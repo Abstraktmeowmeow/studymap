@@ -1,0 +1,78 @@
+rules_version = '2';
+service cloud.firestore {
+ match /databases/{database}/documents {
+  function signedIn(){ return request.auth != null; }
+  function owner(mapId){return signedIn() && get(/databases/$(database)/documents/maps/$(mapId)).data.owner == request.auth.uid;}
+  function member(mapId){return signedIn() && exists(/databases/$(database)/documents/maps/$(mapId)/members/$(request.auth.uid));}
+  function canEdit(mapId){return signedIn() && getAfter(/databases/$(database)/documents/maps/$(mapId)/members/$(request.auth.uid)).data.role in ['owner','editor'];}
+  function goodNode(){
+   return request.resource.data.keys().hasOnly(['id','label','parentId','x','y','color','notes','image'])
+   && request.resource.data.id is string && request.resource.data.id.size() <= 100
+   && request.resource.data.label is string && request.resource.data.label.size() <= 140
+   && (request.resource.data.parentId == null || (request.resource.data.parentId is string && request.resource.data.parentId.size() <= 100))
+   && request.resource.data.x is number && request.resource.data.y is number
+   && request.resource.data.x > -1000000 && request.resource.data.x < 1000000
+   && request.resource.data.y > -1000000 && request.resource.data.y < 1000000
+   && request.resource.data.color is string && request.resource.data.color.matches('^#[0-9a-fA-F]{6}$')
+   && request.resource.data.notes is string && request.resource.data.notes.size() <= 15000
+   && request.resource.data.image is string && request.resource.data.image.size() <= 1000
+   && (request.resource.data.image == '' || request.resource.data.image.matches('^https://.*'));
+  }
+  match /maps/{mapId} {
+   allow create: if signedIn() && request.resource.data.owner == request.auth.uid
+    && request.resource.data.keys().hasOnly(['title','owner','folderId','createdAt','updatedAt'])
+    && request.resource.data.title is string && request.resource.data.title.size() <= 120
+    && request.resource.data.folderId is string;
+   allow get: if member(mapId);
+   allow list: if false;
+   allow update: if owner(mapId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title','folderId','updatedAt'])
+    && request.resource.data.title is string && request.resource.data.title.size() <= 120
+    && request.resource.data.folderId is string;
+   allow delete: if false;
+   match /members/{uid} {
+    allow get: if signedIn() && (uid == request.auth.uid || owner(mapId));
+    allow list: if owner(mapId);
+    allow create: if signedIn() && (
+      (uid == request.auth.uid && getAfter(/databases/$(database)/documents/maps/$(mapId)).data.owner == uid
+       && request.resource.data.role == 'owner' && request.resource.data.keys().hasOnly(['role','joinedAt']))
+      || (uid == request.auth.uid && request.resource.data.keys().hasOnly(['role','inviteId','joinedAt'])
+        && request.resource.data.inviteId is string
+        && exists(/databases/$(database)/documents/invites/$(request.resource.data.inviteId))
+        && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteId)).data.mapId == mapId
+        && request.resource.data.role == get(/databases/$(database)/documents/invites/$(request.resource.data.inviteId)).data.role)
+     );
+    allow update: if false;
+    allow delete: if uid == request.auth.uid && !owner(mapId);
+   }
+   match /nodes/{nodeId} {
+    allow read: if member(mapId);
+    allow create,update: if canEdit(mapId) && request.resource.data.id == nodeId && goodNode();
+    allow delete: if canEdit(mapId);
+   }
+  }
+  match /invites/{inviteId} {
+   allow get: if signedIn();
+   allow list: if false;
+   allow create: if signedIn() && request.resource.data.keys().hasOnly(['mapId','role','createdAt'])
+     && request.resource.data.mapId is string
+     && owner(request.resource.data.mapId)
+     && request.resource.data.role in ['editor','viewer'];
+   allow update: if false;
+   allow delete: if signedIn() && owner(resource.data.mapId);
+  }
+  match /users/{uid}/mapIndex/{mapId} {
+   allow get,list: if signedIn() && uid == request.auth.uid;
+   allow create,update: if signedIn() && uid == request.auth.uid
+     && request.resource.data.mapId == mapId
+     && request.resource.data.keys().hasOnly(['mapId','role','addedAt'])
+     && getAfter(/databases/$(database)/documents/maps/$(mapId)/members/$(uid)).data.role == request.resource.data.role;
+   allow delete: if signedIn() && uid == request.auth.uid;
+  }
+  match /users/{uid}/folders/{folderId} {
+   allow read,delete: if signedIn() && uid == request.auth.uid;
+   allow create,update: if signedIn() && uid == request.auth.uid
+    && request.resource.data.keys().hasOnly(['name','createdAt'])
+    && request.resource.data.name is string && request.resource.data.name.size() <= 80;
+  }
+ }
+}
